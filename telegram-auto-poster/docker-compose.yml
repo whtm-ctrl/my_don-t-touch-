@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: telegram_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-telegram_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-telegram_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-telegram_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - telegram_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-telegram_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: telegram_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - telegram_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scraper:
+    build:
+      context: ./scraper
+      dockerfile: Dockerfile
+    container_name: telegram_scraper
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-telegram_user}:${POSTGRES_PASSWORD:-telegram_pass}@postgres:5432/${POSTGRES_DB:-telegram_db}
+      REDIS_URL: redis://redis:6379
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_PHONE: ${TELEGRAM_PHONE}
+      TELEGRAM_SESSION_STRING: ${TELEGRAM_SESSION_STRING}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      TARGET_CHANNEL_ID: ${TARGET_CHANNEL_ID}
+      ADMIN_CHAT_ID: ${ADMIN_CHAT_ID}
+      BOT_TOKEN: ${BOT_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - scraper_sessions:/app/sessions
+      - scraper_media:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - telegram_network
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: telegram_api
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-telegram_user}:${POSTGRES_PASSWORD:-telegram_pass}@postgres:5432/${POSTGRES_DB:-telegram_db}
+      REDIS_URL: redis://redis:6379
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_PHONE: ${TELEGRAM_PHONE}
+      BOT_TOKEN: ${BOT_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - telegram_network
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: telegram_dashboard
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    networks:
+      - telegram_network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: telegram_prometheus
+    volumes:
+      - ./grafana/provisioning/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+    networks:
+      - telegram_network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: telegram_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - telegram_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  scraper_sessions:
+  scraper_media:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  telegram_network:
+    driver: bridge
